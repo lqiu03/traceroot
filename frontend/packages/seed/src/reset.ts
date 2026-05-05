@@ -5,7 +5,6 @@ import {
   type ClickhouseConfig,
 } from "./clickhouse-helpers.js";
 import type { SeededProject } from "./prisma-seed.js";
-import { resetPrisma } from "./prisma-seed.js";
 
 const TABLES_WITH_PROJECT_AND_TRACE_ID = ["traces", "spans"] as const;
 const MUTATION_POLL_INTERVAL_MS = 250;
@@ -78,9 +77,4 @@ export async function resetClickhouse(
       await client.close();
     }
   }
-}
-
-export async function resetAll(args: ResetArgs): Promise<void> {
-  await resetClickhouse(args);
-  await resetPrisma();
 }

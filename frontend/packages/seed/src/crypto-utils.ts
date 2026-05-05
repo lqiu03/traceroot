@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 
 /**
  * SHA-256 hex digest. Must match the backend's
@@ -23,11 +23,6 @@ export function deterministicHex(seed: string, length: number): string {
 export function keyHint(plaintext: string): string {
   if (plaintext.length <= 8) return plaintext;
   return `${plaintext.slice(0, 4)}…${plaintext.slice(-4)}`;
-}
-
-/** Generate a random API key with the given prefix. Used for non-seed paths. */
-export function randomApiKey(prefix: string = "tr"): string {
-  return `${prefix}_${randomBytes(24).toString("hex")}`;
 }
 
 /**

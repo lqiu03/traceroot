@@ -3,7 +3,6 @@ import {
   trace as otelTrace,
   SpanKind as OtelSpanKind,
   SpanStatusCode,
-  type Span as OtelSpan,
   type Context as OtelContext,
 } from "@opentelemetry/api";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
@@ -150,7 +149,6 @@ export async function ingestProject(args: IngestProjectArgs): Promise<{
   try {
     for (const trace of project.traces) {
       const traceAnchor = offsetFromAnchor(anchor, trace.traceOffsetMs);
-      const spanByKey = new Map<string, OtelSpan>();
       const ctxByKey = new Map<string, OtelContext>();
 
       // Spans are declared in topological order (root first, children after).
@@ -181,7 +179,6 @@ export async function ingestProject(args: IngestProjectArgs): Promise<{
         });
 
         otelSpan.end(endTime);
-        spanByKey.set(span.key, otelSpan);
         ctxByKey.set(span.key, otelTrace.setSpan(otelContext.active(), otelSpan));
         spansEmitted += 1;
       }
