@@ -4,7 +4,7 @@
 
 PROD_COMPOSE := docker compose -f docker-compose.prod.yml
 
-.PHONY: install-hooks dev dev-lite dev-autoreload dev-reset prod prod-lite prod-reset
+.PHONY: install-hooks dev dev-lite dev-autoreload dev-reset prod prod-lite prod-reset seed seed-reset
 
 ## Install repository git hooks for contributors.
 install-hooks:
@@ -42,3 +42,15 @@ prod-lite:
 ## Nuclear reset: stop containers, remove volumes, built images, and orphaned sandboxes.
 prod-reset:
 	uv run python tmux_tools/launcher.py --prod-reset
+
+# --- Seed local stack -------------------------------------------------------
+
+## Populate the local stack with synthetic projects, users, traces, and spans
+## for visual UI verification. Requires `make dev` already running.
+## Idempotent — safe to run repeatedly. Refuses to run against non-local CH.
+seed:
+	cd frontend && pnpm --filter @traceroot/seed run seed
+
+## Remove only seed-prefixed rows from Postgres + ClickHouse. Real data is untouched.
+seed-reset:
+	cd frontend && pnpm --filter @traceroot/seed run seed:reset
