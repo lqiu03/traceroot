@@ -252,6 +252,7 @@ async function runSeed(opts: CliOptions): Promise<void> {
   const elapsed = ((Date.now() - start) / 1000).toFixed(1);
   log(`done in ${elapsed}s`);
   log("explore: http://localhost:3000/workspaces");
+  log("tip: re-run `make seed` after creating detectors in the UI to backfill their runs.");
   for (const project of projects) {
     const fixture = fixtureBySlug.get(project.slug);
     const count = measured.get(project.id) ?? 0;

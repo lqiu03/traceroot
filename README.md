@@ -78,6 +78,36 @@ The fastest way to get started. Ample storages and LLM tokens for testing, no cr
 
 - [Terraform (AWS)](./deploy/): Run TraceRoot on k8s with Helm and Terraform. This is for production hosting. Still in experimental stage.
 
+### Seeding the local stack with synthetic data
+
+Once `make dev` (or `make prod-lite`) is running, populate the UI with
+synthetic projects, traces, and detector outputs for visual verification:
+
+```bash
+# 1. Initial seed: creates synthetic workspaces and projects
+make seed
+
+# 2. Sign up at http://localhost:3000 with your email
+
+# 3. Re-run seed with your email so you become a member of seed workspaces
+SEED_ATTACH_USER_EMAIL=you@example.com make seed
+
+# 4. (Optional) Create a detector in the UI under any seed project,
+#    then re-run seed to backfill its runs and findings:
+SEED_ATTACH_USER_EMAIL=you@example.com make seed
+```
+
+`make seed` is **idempotent** — re-running is safe and intended. The seed
+discovers any detector inside a seed-owned workspace (synthetic or
+UI-created) and backfills `detector_runs` + `detector_findings` against it
+with deterministic ids that collapse on re-run.
+
+To remove all seed data without touching your own:
+
+```bash
+make seed-reset
+```
+
 ## Integrations
 
 ### Model Providers

@@ -45,8 +45,19 @@ prod-reset:
 
 # --- Seed local stack -------------------------------------------------------
 
-## Populate the local stack with synthetic projects, users, traces, and spans
-## for visual UI verification. Requires `make dev` already running.
+## Populate the local stack with synthetic projects, users, traces, spans,
+## detectors, and detector runs/findings. Requires `make dev` already running.
+##
+## Two-phase workflow (re-runs are first-class, not exceptional):
+##   1. `make seed`                        — creates seed workspaces + projects
+##   2. Sign up in the UI                  — your account exists in Postgres
+##   3. `SEED_ATTACH_USER_EMAIL=you@x make seed`
+##                                         — attaches your account to seed workspaces
+##   4. (Optional) Create a detector in UI, then re-run step 3 to backfill its
+##      detector_runs and detector_findings. The seed discovers detectors via
+##      a Postgres scope predicate (workspace.is_seed=TRUE OR detector.is_seed=TRUE),
+##      so UI-created detectors in seed workspaces get backfilled too.
+##
 ## Idempotent — safe to run repeatedly. Refuses to run against non-local CH.
 seed:
 	cd frontend && pnpm --filter @traceroot/seed run seed
