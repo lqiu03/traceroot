@@ -256,6 +256,11 @@ async function runSeed(opts: CliOptions): Promise<void> {
   for (const project of projects) {
     const fixture = fixtureBySlug.get(project.slug);
     const count = measured.get(project.id) ?? 0;
+    // `expectsTraces` flips with the SEED_INCLUDE_EMPTY env flag because
+    // buildSeedProjects() returns `[]` for search/labs-demo when set. Default
+    // mode (flag off): every project has a non-empty fixture, so the third
+    // branch is unreachable. Flag mode: the third branch becomes the honest
+    // "I planned this empty" label.
     const expectsTraces = (fixture?.traces.length ?? 0) > 0;
     let tag: string;
     if (count > 0) {
@@ -263,7 +268,7 @@ async function runSeed(opts: CliOptions): Promise<void> {
     } else if (expectsTraces) {
       tag = "(0 traces — fixture has traces but ingest did not land; check worker logs)";
     } else {
-      tag = "(0 traces, expected — exercises empty-state UI)";
+      tag = "(0 traces, expected — exercises empty-state UI; SEED_INCLUDE_EMPTY=true)";
     }
     log(`  - ${project.id} ${tag}`);
   }
