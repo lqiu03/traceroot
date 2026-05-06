@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  buildIngestHeaders,
-  deterministicSpanId,
-  deterministicTraceId,
-} from "../otel-exporter.js";
+import { buildIngestHeaders, deterministicSpanId, deterministicTraceId } from "../otel-exporter.js";
 
 describe("buildIngestHeaders", () => {
   it("emits an Authorization: Bearer <key> header (and only that)", () => {

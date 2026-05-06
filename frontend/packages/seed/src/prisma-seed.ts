@@ -242,9 +242,7 @@ export async function resetPrisma(): Promise<void> {
   // Falls back gracefully if the is_seed column is missing on older DBs.
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await (getPrisma() as any).$executeRawUnsafe(
-      `DELETE FROM detectors WHERE is_seed = TRUE`,
-    );
+    await (getPrisma() as any).$executeRawUnsafe(`DELETE FROM detectors WHERE is_seed = TRUE`);
   } catch {
     // is_seed column not present yet — fall back to id prefix
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
