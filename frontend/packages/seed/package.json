@@ -15,7 +15,8 @@
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:e2e": "dotenv -e ../../../.env -- tsx scripts/e2e-smoke.ts"
   },
   "dependencies": {
     "@clickhouse/client": "^1.10.0",
