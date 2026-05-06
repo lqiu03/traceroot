@@ -3,8 +3,11 @@ import { describe, expect, it } from "vitest";
 import {
   SEED_PROJECTS,
   SEED_WORKSPACES,
+  buildSeedProjects,
   f1AgentRagSuccess,
   f2AgentToolFailure,
+  f4SearchRagTraces,
+  f5ExperimentPipelineTraces,
 } from "../fixtures/index.js";
 import type { SeedTrace } from "../fixture-types.js";
 
@@ -46,8 +49,26 @@ describe("SEED_PROJECTS", () => {
     expect(new Set(slugs).size).toBe(slugs.length);
   });
 
-  it("at least one project is intentionally empty (exercises empty-state UI)", () => {
-    expect(SEED_PROJECTS.filter((p) => p.traces.length === 0).length).toBeGreaterThanOrEqual(1);
+  it("default mode: every project has trace data (no surprise-empty projects in the UI)", () => {
+    const projects = buildSeedProjects({});
+    expect(projects).toHaveLength(3);
+    for (const p of projects) {
+      expect(p.traces.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("SEED_INCLUDE_EMPTY=true: search and labs-demo revert to empty (covers empty-state UI)", () => {
+    const projects = buildSeedProjects({ SEED_INCLUDE_EMPTY: "true" });
+    const bySlug = new Map(projects.map((p) => [p.slug, p]));
+    expect(bySlug.get("checkout")!.traces.length).toBeGreaterThan(0);
+    expect(bySlug.get("search")!.traces.length).toBe(0);
+    expect(bySlug.get("labs-demo")!.traces.length).toBe(0);
+  });
+
+  it("SEED_INCLUDE_EMPTY=1 (numeric truthy) is also accepted", () => {
+    const projects = buildSeedProjects({ SEED_INCLUDE_EMPTY: "1" });
+    const bySlug = new Map(projects.map((p) => [p.slug, p]));
+    expect(bySlug.get("search")!.traces.length).toBe(0);
   });
 
   it("every project's workspaceSlug matches a declared workspace", () => {
@@ -95,6 +116,92 @@ describe("F2 — agent + tool failure", () => {
   it("has valid parent linkage and topological ordering", () => {
     assertParentLinkage(f2AgentToolFailure);
     assertTopologicalOrder(f2AgentToolFailure);
+  });
+});
+
+describe("F4 — search RAG (3 instances)", () => {
+  it("emits exactly 3 instances (cheap volume win without procedural generator)", () => {
+    expect(f4SearchRagTraces).toHaveLength(3);
+  });
+
+  it("every instance has unique trace key (no id collisions across re-runs)", () => {
+    const keys = f4SearchRagTraces.map((t) => t.key);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it("every instance has valid parent linkage and topological ordering", () => {
+    for (const trace of f4SearchRagTraces) {
+      assertParentLinkage(trace);
+      assertTopologicalOrder(trace);
+    }
+  });
+
+  it("instances are jittered across distinct anchor offsets (not co-located)", () => {
+    const offsets = f4SearchRagTraces.map((t) => t.traceOffsetMs);
+    expect(new Set(offsets).size).toBe(offsets.length);
+  });
+
+  it("all instances are success-path (error rendering covered by f2 + f5 instance 2)", () => {
+    for (const trace of f4SearchRagTraces) {
+      const errors = trace.spans.filter((s) => s.status === "ERROR");
+      expect(errors).toHaveLength(0);
+    }
+  });
+});
+
+describe("F5 — experiment pipeline (parallel branches, mixed status)", () => {
+  it("emits exactly 3 instances", () => {
+    expect(f5ExperimentPipelineTraces).toHaveLength(3);
+  });
+
+  it("every instance has unique trace key", () => {
+    const keys = f5ExperimentPipelineTraces.map((t) => t.key);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it("every instance has valid parent linkage", () => {
+    for (const trace of f5ExperimentPipelineTraces) {
+      assertParentLinkage(trace);
+    }
+  });
+
+  it("variant_a and variant_b overlap in time on every instance (UI must render parallel)", () => {
+    for (const trace of f5ExperimentPipelineTraces) {
+      const a = trace.spans.find((s) => s.key === "llm.variant_a");
+      const b = trace.spans.find((s) => s.key === "llm.variant_b");
+      expect(a).toBeDefined();
+      expect(b).toBeDefined();
+      const overlapStart = Math.max(a!.startOffsetMs, b!.startOffsetMs);
+      const overlapEnd = Math.min(a!.endOffsetMs, b!.endOffsetMs);
+      expect(overlapEnd).toBeGreaterThan(overlapStart);
+    }
+  });
+
+  it("variant_a and variant_b are siblings under the root, not chained", () => {
+    for (const trace of f5ExperimentPipelineTraces) {
+      const a = trace.spans.find((s) => s.key === "llm.variant_a");
+      const b = trace.spans.find((s) => s.key === "llm.variant_b");
+      expect(a!.parentKey).toBe("root");
+      expect(b!.parentKey).toBe("root");
+    }
+  });
+
+  it("eval.compare starts strictly after both variants finish", () => {
+    for (const trace of f5ExperimentPipelineTraces) {
+      const a = trace.spans.find((s) => s.key === "llm.variant_a")!;
+      const b = trace.spans.find((s) => s.key === "llm.variant_b")!;
+      const compare = trace.spans.find((s) => s.key === "eval.compare")!;
+      expect(compare.startOffsetMs).toBeGreaterThanOrEqual(a.endOffsetMs);
+      expect(compare.startOffsetMs).toBeGreaterThanOrEqual(b.endOffsetMs);
+    }
+  });
+
+  it("at least one instance has variant_b ERROR with a statusMessage", () => {
+    const errorVariants = f5ExperimentPipelineTraces.flatMap((t) =>
+      t.spans.filter((s) => s.key === "llm.variant_b" && s.status === "ERROR"),
+    );
+    expect(errorVariants.length).toBeGreaterThanOrEqual(1);
+    expect(errorVariants[0].statusMessage).toBeTruthy();
   });
 });
 

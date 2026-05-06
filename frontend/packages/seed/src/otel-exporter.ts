@@ -9,7 +9,7 @@ import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 import { Resource } from "@opentelemetry/resources";
 import {
   BasicTracerProvider,
-  SimpleSpanProcessor,
+  BatchSpanProcessor,
   type IdGenerator,
 } from "@opentelemetry/sdk-trace-node";
 import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
@@ -149,7 +149,20 @@ export async function ingestProject(args: IngestProjectArgs): Promise<{
       "deployment.environment": "seed",
     }),
     idGenerator: new QueueIdGenerator(traceIds, spanIds),
-    spanProcessors: [new SimpleSpanProcessor(exporter)],
+    // Batch (not Simple) so all spans of the burst are exported in a small
+    // number of OTLP POSTs rather than per-span. SimpleSpanProcessor is
+    // fire-and-forget — when ingestProject finishes for a project and the
+    // SDK shuts down, in-flight per-span POSTs would race the shutdown and
+    // surface as `ClientDisconnect` at backend/rest/routers/public/traces.py.
+    // The forceFlush+shutdown sequence below drains the batch deterministically.
+    spanProcessors: [
+      new BatchSpanProcessor(exporter, {
+        maxQueueSize: 256,
+        scheduledDelayMillis: 200,
+        exportTimeoutMillis: 30_000,
+        maxExportBatchSize: 64,
+      }),
+    ],
   });
 
   const tracer = provider.getTracer(SDK_NAME);
