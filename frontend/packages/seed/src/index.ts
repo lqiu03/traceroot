@@ -8,13 +8,15 @@ import {
   getCeleryQueueDepth,
   readClickhouseConfig,
 } from "./clickhouse-helpers.js";
-import { SEED_PROJECTS, SEED_WORKSPACES } from "./fixtures/index.js";
-import { ingestProject } from "./otel-exporter.js";
+import { seedDetectorOutputs } from "./detector-discovery.js";
+import { SEED_DETECTORS, SEED_PROJECTS, SEED_WORKSPACES } from "./fixtures/index.js";
+import { deterministicTraceId, ingestProject } from "./otel-exporter.js";
 import { ProdGuardError, checkProdGuard, summarizeProdGuard } from "./prod-guard.js";
 import {
   projectId as derivedProjectId,
   disconnectPrisma,
   resetPrisma,
+  seedDetectors,
   seedPrisma,
   validateSeedKeyRoundtrip,
   type SeededProject,
@@ -229,6 +231,21 @@ async function runSeed(opts: CliOptions): Promise<void> {
     }
   }
 
+  // Synthetic detectors (Postgres rows) — children written below.
+  await seedDetectors(SEED_DETECTORS);
+
+  // Discovery pass: backfill detector_runs + detector_findings for every
+  // seed-scoped detector — fixture-inserted AND UI-created. Single write
+  // path; idempotent. This is the structural fix that makes re-runs of
+  // `make seed` first-class for detector data.
+  const detectorOutputs = await runDetectorDiscovery(projects, fixtureBySlug);
+  if (detectorOutputs.detectors > 0) {
+    log(
+      `detectors: ${detectorOutputs.detectors} discovered, ` +
+        `${detectorOutputs.runs} runs + ${detectorOutputs.findings} findings written`,
+    );
+  }
+
   // Final summary: derive labels from measured ClickHouse state, not from
   // fixture intent. Honest-output rule.
   const measured = await measureFinalCounts(projects.map((p) => p.id));
@@ -248,6 +265,46 @@ async function runSeed(opts: CliOptions): Promise<void> {
       tag = "(0 traces, expected — exercises empty-state UI)";
     }
     log(`  - ${project.id} ${tag}`);
+  }
+}
+
+async function runDetectorDiscovery(
+  projects: readonly SeededProject[],
+  fixtureBySlug: Map<string, (typeof SEED_PROJECTS)[number]>,
+): Promise<{ detectors: number; runs: number; findings: number }> {
+  // Build trace-id map for the discovery pass: ids the seed already wrote
+  // through OTLP, so detector outputs reference real traces.
+  const traceIdsByProject = new Map<string, string[]>();
+  for (const seeded of projects) {
+    const fixture = fixtureBySlug.get(seeded.slug);
+    if (!fixture || fixture.traces.length === 0) continue;
+    traceIdsByProject.set(
+      seeded.id,
+      fixture.traces.map((t) => deterministicTraceId(seeded.slug, t.key)),
+    );
+  }
+  const cfg = readClickhouseConfig();
+  const ch = createClickhouseClient(cfg);
+  // Reuse the existing Prisma instance from prisma-seed.ts via the package's
+  // own getter — but discoverSeedDetectors expects a PrismaClient, so import
+  // a minimal one inline. The seed-package singleton is owned by prisma-seed.
+  const { PrismaClient } = await import("@prisma/client");
+  const prisma = new PrismaClient({ log: ["error", "warn"] });
+  try {
+    return await seedDetectorOutputs(prisma, ch, {
+      runsPerDetector: 90,
+      findingRate: 0.55,
+      traceIdsByProject,
+      anchor: getSeedAnchor(),
+    });
+  } catch (e) {
+    // Honesty: if the discovery pass fails (e.g. CH down or tables missing),
+    // surface the error and continue — the base seed already succeeded.
+    warn(`detector discovery failed: ${e instanceof Error ? e.message : String(e)}`);
+    return { detectors: 0, runs: 0, findings: 0 };
+  } finally {
+    await prisma.$disconnect();
+    await ch.close();
   }
 }
 

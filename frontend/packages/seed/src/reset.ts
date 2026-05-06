@@ -37,7 +37,7 @@ async function waitForMutations(client: ClickHouseClient): Promise<void> {
   const deadline = Date.now() + MUTATION_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const rs = await client.query({
-      query: `SELECT count() AS c FROM system.mutations WHERE is_done = 0 AND (table = 'traces' OR table = 'spans')`,
+      query: `SELECT count() AS c FROM system.mutations WHERE is_done = 0 AND table IN ('traces', 'spans', 'detector_runs', 'detector_findings')`,
       format: "JSONEachRow",
     });
     const rows = (await rs.json()) as Array<{ c: string | number }>;
@@ -71,6 +71,21 @@ export async function resetClickhouse(
       const { sql, params } = buildClickhouseDeleteSql(table, projectIds);
       await client.command({ query: sql, query_params: params });
     }
+    // Detector output tables: scoped by seed-id-prefix on the natural key
+    // AND seed project_id, so we never touch a UI-created row that happens
+    // to land in a seed project.
+    await client.command({
+      query:
+        `ALTER TABLE detector_runs DELETE ` +
+        `WHERE startsWith(run_id, 'seed-run-') AND project_id IN ({pids:Array(String)})`,
+      query_params: { pids: projectIds },
+    });
+    await client.command({
+      query:
+        `ALTER TABLE detector_findings DELETE ` +
+        `WHERE startsWith(finding_id, 'seed-find-') AND project_id IN ({pids:Array(String)})`,
+      query_params: { pids: projectIds },
+    });
     await waitForMutations(client);
   } finally {
     if (ownsClient) {

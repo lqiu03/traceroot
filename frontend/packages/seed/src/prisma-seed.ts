@@ -2,6 +2,7 @@ import { PrismaClient } from "@prisma/client";
 
 import { deterministicHex, deterministicSeedApiKey, keyHint, sha256Hex } from "./crypto-utils.js";
 import type { SeedProject, SeedWorkspace } from "./fixture-types.js";
+import type { SeedDetector } from "./fixtures/f3-failure-detector.js";
 
 /**
  * Local PrismaClient instead of the `@traceroot/core` singleton: tsx on
@@ -115,13 +116,16 @@ export async function seedPrisma(
     const id = workspaceId(ws.slug);
     await getPrisma().workspace.upsert({
       where: { id },
-      update: { name: ws.name },
+      // Defensively set isSeed=true on update too — covers the case where a
+      // workspace was created before the is_seed migration landed.
+      update: { name: ws.name, isSeed: true },
       create: {
         id,
         name: ws.name,
         billingPlan: "free",
         ingestionBlocked: false,
         aiBlocked: false,
+        isSeed: true,
       },
     });
 
@@ -191,8 +195,63 @@ export async function seedPrisma(
   };
 }
 
+/**
+ * Upserts synthetic detector rows (Postgres) via raw SQL — the Detector
+ * model isn't in our local Prisma schema (the upstream migration that
+ * adds it lives on a different branch), but the table exists at runtime
+ * and we don't need the typed client to insert deterministic test rows.
+ *
+ * Sets is_seed=true so the discovery pass (and reset) can scope to these
+ * regardless of which prefix the id ends up using.
+ */
+export async function seedDetectors(detectors: readonly SeedDetector[]): Promise<void> {
+  if (detectors.length === 0) return;
+  for (const d of detectors) {
+    // Postgres path. UPDATE-then-INSERT keeps idempotency under re-runs and
+    // avoids depending on a typed Detector model that we don't ship here.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const prismaAny = getPrisma() as any;
+    await prismaAny.$executeRawUnsafe(
+      `INSERT INTO detectors (
+         id, project_id, name, template, prompt, output_schema,
+         sample_rate, enabled, create_time, update_time, is_seed
+       ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, NOW(), NOW(), TRUE)
+       ON CONFLICT (id) DO UPDATE SET
+         name = EXCLUDED.name,
+         template = EXCLUDED.template,
+         prompt = EXCLUDED.prompt,
+         output_schema = EXCLUDED.output_schema,
+         sample_rate = EXCLUDED.sample_rate,
+         is_seed = TRUE,
+         update_time = NOW()`,
+      d.id,
+      d.projectId,
+      d.name,
+      d.template,
+      d.prompt,
+      JSON.stringify(d.outputSchema),
+      d.sampleRate,
+      true,
+    );
+  }
+}
+
 /** Removes all seed-prefixed Prisma rows. Cascades through Project → AccessKey. */
 export async function resetPrisma(): Promise<void> {
+  // Delete is_seed-flagged detectors first (cascade handles their FK refs).
+  // Falls back gracefully if the is_seed column is missing on older DBs.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (getPrisma() as any).$executeRawUnsafe(
+      `DELETE FROM detectors WHERE is_seed = TRUE`,
+    );
+  } catch {
+    // is_seed column not present yet — fall back to id prefix
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (getPrisma() as any).$executeRawUnsafe(
+      `DELETE FROM detectors WHERE id LIKE 'seed-det-%'`,
+    );
+  }
   // Delete by id prefix; cascade does Project, AccessKey, WorkspaceMember.
   await getPrisma().workspace.deleteMany({
     where: { id: { startsWith: "seed-ws-" } },
