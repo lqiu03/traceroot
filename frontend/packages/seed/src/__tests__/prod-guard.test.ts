@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ProdGuardError, checkProdGuard } from "../prod-guard.js";
+import { ProdGuardError, checkProdGuard, summarizeProdGuard } from "../prod-guard.js";
 
 const localBaseline = {
   CLICKHOUSE_HOST: "localhost",
@@ -41,5 +41,28 @@ describe("checkProdGuard", () => {
         DATABASE_URL: "postgresql://user:pass@db.prod.internal:5432/traceroot",
       }),
     ).toThrow(ProdGuardError);
+  });
+
+  it("returns a summary describing what was observed (honest-output rule)", () => {
+    const summary = checkProdGuard(localBaseline);
+    expect(summary.chHost).toBe("localhost");
+    expect(summary.dbHostMarker).toBe("localhost");
+    expect(summary.nodeEnv).toBe("");
+    expect(summary.trEnv).toBe("");
+  });
+});
+
+describe("summarizeProdGuard", () => {
+  it("formats a one-line, log-friendly description", () => {
+    const out = summarizeProdGuard({
+      chHost: "localhost",
+      nodeEnv: "",
+      trEnv: "",
+      dbHostMarker: "localhost",
+    });
+    expect(out).toContain("chHost=localhost");
+    expect(out).toContain("dbHost=localhost");
+    expect(out).toContain("nodeEnv=(unset)");
+    expect(out).toContain("trEnv=(unset)");
   });
 });

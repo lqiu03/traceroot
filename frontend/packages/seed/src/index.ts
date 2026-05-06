@@ -3,12 +3,14 @@ import { parseArgs } from "node:util";
 import { getSeedAnchor, getSeedAnchorDayKey } from "./anchor.js";
 import {
   countSeedTraces,
+  countSeedTracesByProject,
   createClickhouseClient,
+  getCeleryQueueDepth,
   readClickhouseConfig,
 } from "./clickhouse-helpers.js";
 import { SEED_PROJECTS, SEED_WORKSPACES } from "./fixtures/index.js";
 import { ingestProject } from "./otel-exporter.js";
-import { ProdGuardError, checkProdGuard } from "./prod-guard.js";
+import { ProdGuardError, checkProdGuard, summarizeProdGuard } from "./prod-guard.js";
 import {
   projectId as derivedProjectId,
   disconnectPrisma,
@@ -196,22 +198,71 @@ async function runSeed(opts: CliOptions): Promise<void> {
       .map((p) => p.id);
     const { seen, timedOut } = await pollClickhouseUntilSeen(projectIds, totalTraces, opts.verbose);
     if (timedOut) {
-      warn(
-        `timed out after ${POLL_TIMEOUT_MS}ms — saw ${seen}/${totalTraces} traces. ` +
-          `Is the Celery worker running? Check the 'worker' tmux pane or container logs.`,
-      );
+      // Honest-output rule: distinguish "still draining" from "rejected".
+      // Query celery queue depth at exit; ambiguity was today's bug.
+      const redisUrl = process.env.REDIS_URL?.trim() || "redis://127.0.0.1:6379/0";
+      const queueDepth = await getCeleryQueueDepth(redisUrl);
+      const moved = seen > 0;
+      if (moved && queueDepth !== "unknown" && queueDepth > 0) {
+        warn(
+          `still draining: saw ${seen}/${totalTraces} traces, ` +
+            `celery queue depth = ${queueDepth}. Re-run \`make seed\` shortly to verify.`,
+        );
+      } else if (moved) {
+        warn(
+          `slow ingest: saw ${seen}/${totalTraces} traces, ` +
+            `celery queue depth = ${queueDepth}. Re-run \`make seed\` to verify.`,
+        );
+      } else if (queueDepth !== "unknown" && queueDepth > 0) {
+        warn(
+          `no progress yet: 0/${totalTraces} traces, queue depth = ${queueDepth}. ` +
+            `Worker may be slow or stuck — check container logs.`,
+        );
+      } else {
+        warn(
+          `rejected/dropped: 0/${totalTraces} traces, queue depth = ${queueDepth}. ` +
+            `Check rest logs (backend/rest/routers/public/traces.py:176) for auth errors.`,
+        );
+      }
     } else {
       log(`clickhouse: ${seen} trace rows visible`);
     }
   }
 
+  // Final summary: derive labels from measured ClickHouse state, not from
+  // fixture intent. Honest-output rule.
+  const measured = await measureFinalCounts(projects.map((p) => p.id));
   const elapsed = ((Date.now() - start) / 1000).toFixed(1);
   log(`done in ${elapsed}s`);
   log("explore: http://localhost:3000/workspaces");
   for (const project of projects) {
     const fixture = fixtureBySlug.get(project.slug);
-    const tag = fixture?.traces.length ? "(seeded)" : "(empty — exercises empty-state UI)";
+    const count = measured.get(project.id) ?? 0;
+    const expectsTraces = (fixture?.traces.length ?? 0) > 0;
+    let tag: string;
+    if (count > 0) {
+      tag = `(${count} trace${count === 1 ? "" : "s"})`;
+    } else if (expectsTraces) {
+      tag = "(0 traces — fixture has traces but ingest did not land; check worker logs)";
+    } else {
+      tag = "(0 traces, expected — exercises empty-state UI)";
+    }
     log(`  - ${project.id} ${tag}`);
+  }
+}
+
+async function measureFinalCounts(projectIds: readonly string[]): Promise<Map<string, number>> {
+  if (projectIds.length === 0) return new Map();
+  const cfg = readClickhouseConfig();
+  const client = createClickhouseClient(cfg);
+  try {
+    return await countSeedTracesByProject(client, projectIds);
+  } catch {
+    // honesty: if we can't measure, return empty map and the caller will
+    // print 0 traces — which is true: we have no measurement.
+    return new Map();
+  } finally {
+    await client.close();
   }
 }
 
@@ -219,7 +270,8 @@ async function main(): Promise<void> {
   const opts = parseCliArgs(process.argv.slice(2));
 
   try {
-    checkProdGuard(process.env);
+    const summary = checkProdGuard(process.env);
+    log(`prod-guard: passed (${summarizeProdGuard(summary)})`);
   } catch (e) {
     if (e instanceof ProdGuardError) {
       if (opts.force) {

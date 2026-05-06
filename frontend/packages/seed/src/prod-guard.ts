@@ -24,7 +24,28 @@ export interface ProdGuardEnv {
   DATABASE_URL?: string;
 }
 
-export function checkProdGuard(env: ProdGuardEnv): void {
+/** Summary of what `checkProdGuard` observed when allowing the run. */
+export interface ProdGuardSummary {
+  readonly chHost: string;
+  readonly nodeEnv: string;
+  readonly trEnv: string;
+  readonly dbHostMarker: string;
+}
+
+/**
+ * One-line, log-friendly description of which env signals the guard
+ * accepted. Honesty-of-output rule: report what was observed, not silence.
+ */
+export function summarizeProdGuard(s: ProdGuardSummary): string {
+  return (
+    `chHost=${s.chHost || "(unset)"} ` +
+    `nodeEnv=${s.nodeEnv || "(unset)"} ` +
+    `trEnv=${s.trEnv || "(unset)"} ` +
+    `dbHost=${s.dbHostMarker}`
+  );
+}
+
+export function checkProdGuard(env: ProdGuardEnv): ProdGuardSummary {
   const trEnv = (env.TRACEROOT_ENV ?? "").toLowerCase();
   if (trEnv === "prod" || trEnv === "production") {
     throw new ProdGuardError(`TRACEROOT_ENV=${env.TRACEROOT_ENV}`);
@@ -48,4 +69,7 @@ export function checkProdGuard(env: ProdGuardEnv): void {
       `DATABASE_URL does not look local (no localhost/127.0.0.1/@postgres marker)`,
     );
   }
+  const matchedMarker = LOCAL_DB_MARKERS.find((m) => dbUrl.includes(m)) ?? "(no DATABASE_URL set)";
+
+  return { chHost, nodeEnv, trEnv, dbHostMarker: matchedMarker };
 }
