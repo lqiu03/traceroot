@@ -1,0 +1,74 @@
+---
+title: Seeding the Local Stack
+description: Populate a local TraceRoot stack with synthetic projects, traces, and detector outputs
+---
+
+<Note>
+  Seeding is for **local development only**. The seed refuses to run against any non-local ClickHouse or production environment.
+</Note>
+
+`make seed` populates a running local stack with synthetic workspaces, projects, traces, spans, detectors, and detector outputs — the data needed to verify UI changes without writing artisanal SQL or instrumenting a real SDK.
+
+Re-runs are first-class. Every id is deterministic and ClickHouse uses `ReplacingMergeTree`, so re-running `make seed` whenever stack state diverges from what the seed expects is safe and intended.
+
+## Prerequisites
+
+`make dev` (or `make prod-lite`) must already be running — the seed talks to PostgreSQL, ClickHouse, the REST service, and the web app, so all stack services need to be up.
+
+## Workflow
+
+```bash
+# 1. Initial seed: creates synthetic workspaces and projects
+make seed
+
+# 2. Sign up at http://localhost:3000 with your email
+
+# 3. Re-run seed with your email so you become a member of seed workspaces
+SEED_ATTACH_USER_EMAIL=you@example.com make seed
+
+# 4. (Optional) Create a detector in the UI under any seed project,
+#    then re-run seed to backfill its runs and findings:
+SEED_ATTACH_USER_EMAIL=you@example.com make seed
+```
+
+The seed discovers every detector in a seed-owned workspace — fixture-inserted or UI-created — and backfills `detector_runs` and `detector_findings` against each one. Step 4 is what makes this possible: every run converges over current Postgres state rather than replaying fixture intent.
+
+## What Gets Populated
+
+| Layer | Rows |
+|---|---|
+| PostgreSQL | 2 workspaces, 3 projects, 1 demo user, ≥1 fixture detector |
+| ClickHouse | ~150 traces + spans, 90+ detector runs, ~50+ detector findings |
+| Memberships | Demo user is always attached; your user is added when `SEED_ATTACH_USER_EMAIL` is set |
+
+## Configuration
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `SEED_ATTACH_USER_EMAIL` | (unset) | Attach the matching user account to seed workspaces — required to see seed data in the UI as that user |
+| `SEED_OTLP_ENDPOINT` | `http://localhost:8000/api/v1/public/traces` | Override the OTLP ingest endpoint |
+| `INTERNAL_API_SECRET` | required | Shared secret between the seed and the REST service for the auth round-trip guard |
+| `TRACEROOT_UI_URL` | `http://localhost:3000` | Where the auth round-trip guard probes web's `/api/internal/validate-api-key` |
+| `REDIS_URL` | `redis://127.0.0.1:6379/0` | Used at poll exit to query Celery queue depth so "still draining" is distinguishable from "rejected" |
+
+## Reset
+
+```bash
+make seed-reset
+```
+
+Removes only seed-prefixed rows from PostgreSQL and ClickHouse. Your own workspaces, projects, traces, and detectors are untouched.
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| `Failed to validate API key` | `INTERNAL_API_SECRET` differs between the seed environment and the web container |
+| `still draining (queue depth = K)` | Celery worker hasn't drained the queue yet — re-run after a few seconds |
+| `slow ingest: ... no progress` | Worker may be stuck — check `worker` container logs |
+| `rejected/dropped: 0/N traces` | REST rejected all traces — check `backend/rest/routers/public/traces.py` logs for the auth path |
+| UI shows no seed projects | `SEED_ATTACH_USER_EMAIL` was not set on the run — re-run with your account email |
+
+<Warning>
+  The seed never touches data outside its scope. Every PostgreSQL row uses a `seed-` id prefix plus an `is_seed = TRUE` flag, and every ClickHouse row uses a seed-prefixed natural key. Reset removes only rows matching both predicates.
+</Warning>

@@ -65,7 +65,8 @@
             "pages": [
               "getting-started/introduction",
               "getting-started/quickstart",
-              "developer/self-hosting"
+              "developer/self-hosting",
+              "developer/seed"
             ]
           },
           {
