@@ -201,3 +201,90 @@ export async function resetPrisma(): Promise<void> {
     where: { id: { startsWith: "seed-user-" } },
   });
 }
+
+export interface ValidateRoundtripOptions {
+  readonly uiUrl: string;
+  readonly internalSecret: string;
+  readonly retries?: number;
+  readonly backoffMs?: number;
+  readonly perAttemptTimeoutMs?: number;
+}
+
+export interface ValidateRoundtripResult {
+  readonly ok: boolean;
+  readonly attempts: number;
+  readonly status?: number;
+  readonly body?: unknown;
+  readonly error?: string;
+}
+
+/**
+ * Round-trips a seed key through the same `/api/internal/validate-api-key`
+ * route that `backend/rest/routers/public/traces.py` uses for OTLP ingest.
+ *
+ * Why this exists as a runtime guard (not a unit test): a previous run hit
+ * a transient cold-start where rest's first call to web's validate route
+ * timed out mid-OTLP, surfacing only as `0/N traces, timed out` 60 seconds
+ * later — indistinguishable from a true rejection. This guard fails fast
+ * with a precise diagnostic instead. Retries cover the cold-start window.
+ *
+ * Returns a result object instead of throwing so the caller can decide
+ * whether to abort the run or warn-and-continue (e.g. when running against
+ * a stack without web available).
+ */
+export async function validateSeedKeyRoundtrip(
+  seeded: SeededProject,
+  opts: ValidateRoundtripOptions,
+): Promise<ValidateRoundtripResult> {
+  const keyHash = sha256Hex(seeded.apiKey);
+  const url = `${opts.uiUrl.replace(/\/$/, "")}/api/internal/validate-api-key`;
+  const retries = opts.retries ?? 3;
+  const backoffMs = opts.backoffMs ?? 500;
+  const perAttemptTimeoutMs = opts.perAttemptTimeoutMs ?? 5000;
+
+  let lastError: string | undefined;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Internal-Secret": opts.internalSecret,
+        },
+        body: JSON.stringify({ keyHash }),
+        signal: AbortSignal.timeout(perAttemptTimeoutMs),
+      });
+      const status = response.status;
+      const body: unknown = await response.json().catch(() => null);
+
+      const isValid =
+        typeof body === "object" &&
+        body !== null &&
+        (body as { valid?: unknown }).valid === true &&
+        (body as { projectId?: unknown }).projectId === seeded.id;
+
+      if (status === 200 && isValid) {
+        return { ok: true, attempts: attempt, status, body };
+      }
+
+      // Got a definitive response but it didn't validate — no point retrying.
+      return {
+        ok: false,
+        attempts: attempt,
+        status,
+        body,
+        error: `validate-api-key returned status=${status}, body=${JSON.stringify(body)}`,
+      };
+    } catch (e) {
+      lastError = e instanceof Error ? e.message : String(e);
+      if (attempt < retries) {
+        await new Promise((r) => setTimeout(r, backoffMs * attempt));
+      }
+    }
+  }
+  return {
+    ok: false,
+    attempts: retries,
+    error: `network error after ${retries} attempts: ${lastError ?? "unknown"}`,
+  };
+}

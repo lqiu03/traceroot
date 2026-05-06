@@ -14,6 +14,7 @@ import {
   disconnectPrisma,
   resetPrisma,
   seedPrisma,
+  validateSeedKeyRoundtrip,
   type SeededProject,
 } from "./prisma-seed.js";
 import { resetClickhouse } from "./reset.js";
@@ -105,6 +106,53 @@ async function runReset(opts: CliOptions): Promise<void> {
   log("(note: ClickHouse mutations are async; rows may linger briefly)");
 }
 
+function resolveUiUrl(env: NodeJS.ProcessEnv): string {
+  return env.TRACEROOT_UI_URL?.trim() || "http://localhost:3000";
+}
+
+/**
+ * Verifies the seed-issued API keys validate via web's internal route.
+ * Aborts the run with a precise diagnostic if validation fails after
+ * retries — preferable to letting OTLP send and silently produce
+ * `0/N traces, timed out` 60 seconds later.
+ *
+ * Skipped (with a warn) if INTERNAL_API_SECRET isn't set, since the
+ * validate route requires it.
+ */
+async function runValidateApiKeyGuard(
+  projects: readonly SeededProject[],
+  opts: CliOptions,
+): Promise<void> {
+  if (projects.length === 0) return;
+  const internalSecret = process.env.INTERNAL_API_SECRET?.trim();
+  if (!internalSecret) {
+    warn(
+      "INTERNAL_API_SECRET is not set; skipping validate-api-key round-trip guard. " +
+        "OTLP ingest may silently fail if web is unreachable.",
+    );
+    return;
+  }
+  const uiUrl = resolveUiUrl(process.env);
+  const probe = projects[0];
+  const result = await validateSeedKeyRoundtrip(probe, { uiUrl, internalSecret });
+  if (!result.ok) {
+    throw new Error(
+      `seed key for ${probe.id} failed validate-api-key round-trip: ${result.error}\n` +
+        `  troubleshooting:\n` +
+        `    - Is the 'web' container/process up at ${uiUrl}? (try \`curl -s ${uiUrl}\`)\n` +
+        `    - Is INTERNAL_API_SECRET set the same in seed and web environments?\n` +
+        `    - Did the seed's secretHash write to access_keys table successfully?\n` +
+        `    - Run again with --verbose for poll detail.`,
+    );
+  }
+  if (opts.verbose) {
+    log(
+      `auth roundtrip ok: ${probe.id} validated via ${uiUrl}/api/internal/validate-api-key ` +
+        `(${result.attempts} attempt${result.attempts > 1 ? "s" : ""})`,
+    );
+  }
+}
+
 async function runSeed(opts: CliOptions): Promise<void> {
   const start = Date.now();
   log(`endpoint: ${DEFAULT_INGEST_URL}`);
@@ -112,6 +160,12 @@ async function runSeed(opts: CliOptions): Promise<void> {
 
   const { workspaces, projects } = await seedPrisma(SEED_WORKSPACES, SEED_PROJECTS);
   log(`prisma: ${workspaces.length} workspaces, ${projects.length} projects ready`);
+
+  // Runtime guard: round-trip the first seed key through the same
+  // /api/internal/validate-api-key route that rest's OTLP ingest uses.
+  // Catches the cold-start race that today surfaced as `0/N traces, timed
+  // out` 60s later, plus any hash/secret/lookup-field drift in the future.
+  await runValidateApiKeyGuard(projects, opts);
 
   const anchor = getSeedAnchor();
   const fixtureBySlug = new Map(SEED_PROJECTS.map((p) => [p.slug, p]));

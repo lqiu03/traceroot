@@ -26,6 +26,17 @@ export function deterministicTraceId(projectSlug: string, traceKey: string): str
   return deterministicHex(`trace:${projectSlug}:${traceKey}`, 32);
 }
 
+/**
+ * Headers for OTLP ingest. Extracted as a pure function so unit tests can
+ * lock in the exact shape (`Authorization: Bearer <key>`) — header-shape
+ * regressions (e.g. someone swaps `Bearer` for `Token`, or moves the auth
+ * to a different header) are a distinct failure class from the round-trip
+ * guard in `prisma-seed.ts:validateSeedKeyRoundtrip`.
+ */
+export function buildIngestHeaders(apiKey: string): Record<string, string> {
+  return { Authorization: `Bearer ${apiKey}` };
+}
+
 /** Deterministic span id (16 hex chars) from project + trace + span key. */
 export function deterministicSpanId(
   projectSlug: string,
@@ -127,9 +138,7 @@ export async function ingestProject(args: IngestProjectArgs): Promise<{
 
   const exporter = new OTLPTraceExporter({
     url: endpointUrl,
-    headers: {
-      Authorization: `Bearer ${seeded.apiKey}`,
-    },
+    headers: buildIngestHeaders(seeded.apiKey),
   });
 
   const provider = new BasicTracerProvider({
