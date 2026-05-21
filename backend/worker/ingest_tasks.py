@@ -118,8 +118,10 @@ def process_s3_traces(self, s3_key: str, project_id: str) -> dict:
                 traces_without_root = [t for t in traces if t["trace_id"] not in traces_with_root]
                 if traces_without_root:
                     ids = [t["trace_id"] for t in traces_without_root]
+                    # Existence check only — no dedup needed, so skip FINAL
+                    # (FINAL forces an expensive merge-on-read).
                     result = ch_client.query(
-                        "SELECT DISTINCT trace_id FROM traces FINAL"
+                        "SELECT DISTINCT trace_id FROM traces"
                         " WHERE trace_id IN {ids:Array(String)}",
                         parameters={"ids": ids},
                     )

@@ -72,6 +72,7 @@ class ClickHouseClient:
                 "ch_create_time",
                 "ch_update_time",
             ],
+            settings={"async_insert": 1, "wait_for_async_insert": 1},
         )
 
     def insert_spans_batch(self, spans: list[dict[str, Any]]) -> None:
@@ -138,6 +139,7 @@ class ClickHouseClient:
                 "ch_create_time",
                 "ch_update_time",
             ],
+            settings={"async_insert": 1, "wait_for_async_insert": 1},
         )
 
     def query(self, query: str, parameters: dict[str, Any] | None = None):

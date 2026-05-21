@@ -11,8 +11,10 @@ Authentication is via API key in the Authorization header:
     Authorization: Bearer <api_key>
 """
 
+import asyncio
 import gzip
 import hashlib
+import json
 import logging
 import uuid
 from dataclasses import dataclass
@@ -20,6 +22,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 import httpx
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from google.protobuf.json_format import MessageToDict
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
@@ -33,6 +36,32 @@ from shared.config import settings
 from worker.ingest_tasks import process_s3_traces
 
 logger = logging.getLogger(__name__)
+
+# SCRATCH/LOAD-TEST ONLY (not for production merge): de-block the ingest path.
+_bucket_checked = False
+
+
+async def _ensure_bucket_once(s3_service) -> None:
+    """Run the blocking head_bucket check once per process, off the event loop."""
+    global _bucket_checked
+    if _bucket_checked:
+        return
+    await asyncio.to_thread(s3_service.ensure_bucket_exists)
+    _bucket_checked = True
+
+
+# SCRATCH/LOAD-TEST ONLY: cache API-key validation to avoid a web+Postgres
+# round-trip on every ingest request. TTL bounds staleness of ingestion_blocked.
+_AUTH_CACHE_TTL_SECONDS = 30
+_auth_redis: aioredis.Redis | None = None
+
+
+def _get_auth_redis() -> aioredis.Redis:
+    global _auth_redis
+    if _auth_redis is None:
+        _auth_redis = aioredis.from_url(settings.redis.url, decode_responses=True)
+    return _auth_redis
+
 
 router = APIRouter(prefix="/public/traces", tags=["Traces (Public)"])
 
@@ -69,6 +98,22 @@ async def authenticate_api_key(
     # codeql[py/weak-sensitive-data-hashing]
     key_hash = hashlib.sha256(api_key.encode()).hexdigest()
 
+    # Cache hit: skip the web/Postgres validation round-trip entirely.
+    cache_key = f"authcache:{key_hash}"
+    redis_client = _get_auth_redis()
+    try:
+        cached = await redis_client.get(cache_key)
+    except Exception:
+        cached = None
+    if cached:
+        d = json.loads(cached)
+        return AuthResult(
+            project_id=d["project_id"],
+            workspace_id=d["workspace_id"],
+            billing_plan=d["billing_plan"],
+            ingestion_blocked=d["ingestion_blocked"],
+        )
+
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
@@ -104,12 +149,29 @@ async def authenticate_api_key(
             detail=data.get("error", "Invalid API key"),
         )
 
-    return AuthResult(
+    result = AuthResult(
         project_id=data["projectId"],
         workspace_id=data["workspaceId"],
         billing_plan=data["billingPlan"],
         ingestion_blocked=data.get("ingestionBlocked", False),
     )
+    # Cache the validated result so subsequent requests skip the round-trip.
+    try:
+        await redis_client.set(
+            cache_key,
+            json.dumps(
+                {
+                    "project_id": result.project_id,
+                    "workspace_id": result.workspace_id,
+                    "billing_plan": result.billing_plan,
+                    "ingestion_blocked": result.ingestion_blocked,
+                }
+            ),
+            ex=_AUTH_CACHE_TTL_SECONDS,
+        )
+    except Exception:
+        pass
+    return result
 
 
 Auth = Annotated[AuthResult, Depends(authenticate_api_key)]
@@ -216,8 +278,8 @@ async def ingest_traces(
     # 5. Upload JSON to S3
     try:
         s3_service = get_s3_service()
-        s3_service.ensure_bucket_exists()
-        s3_service.upload_json(s3_key, trace_data)
+        await _ensure_bucket_once(s3_service)
+        await asyncio.to_thread(s3_service.upload_json, s3_key, trace_data)
         logger.info(f"Stored OTEL JSON to {s3_key} for project {project_id}")
     except Exception as e:
         logger.error(f"Failed to upload OTEL JSON to S3: {e}")
