@@ -134,3 +134,35 @@ Scratch edits: `async_insert=1, wait_for_async_insert=1` on both ClickHouse inse
 - Single sequential client session in the micro-benchmark let merges interleave; a massively concurrent insert storm would spike parts higher transiently — but the 3000 threshold leaves wide headroom.
 - Test ran on one dev machine (Docker Desktop) with co-located services; absolute RPS would differ in prod, but the *serialization signature* (flat throughput vs concurrency) is environment-independent and is the key finding.
 - Ramp only reached ~11 RPS, so the worker/queue/parts walls were not driven to failure — they are masked by P0. Re-run after P0 to find the next wall.
+
+## P1 demonstrated end-to-end: unbounded queue → admission control (2026-05-22)
+
+To exhibit the queue/backpressure wall (masked at achievable RPS because the worker keeps up), the worker was deliberately throttled to `--concurrency 1` (simulating REST replicas outnumbering worker capacity). Also note: mid-experiment the **free-plan 50k-event quota** flipped `ingestion_blocked=true` via the hourly billing job → all ingestion returned **402** (live confirmation of the eventually-consistent quota / roadmap L3); worked around by moving the test workspace to a paid plan.
+
+**Failure mode (no backpressure), conc=40, concurrency-1 worker:**
+
+| elapsed | queue depth | REST result |
+|---|---|---|
+| 0s | 0 | — |
+| 13s | 169 | all 200 |
+| 27s | 391 | all 200 |
+| 42s | 629 | all 200 |
+| 65s | 979 | all 200 |
+
+Queue grew **linearly, unbounded**; REST returned **200 for every request** (0 errors). Rows advanced at ~85 spans/s (the concurrency-1 drain). In prod this path → Redis OOM + ever-staler data, and (because enqueue errors are swallowed) silent loss on OOM.
+
+**The fix (prototype):** admission control in the ingest handler — `LLEN celery`; if backlog > `_QUEUE_HIGH_WATER` (500), return `429 + Retry-After: 5` before doing any work. (Scratch edit in `backend/rest/routers/public/traces.py`.)
+
+**After the fix, identical overload:**
+
+| elapsed | queue depth (no fix) | queue depth (with fix) |
+|---|---|---|
+| 13s | 169 | 253 |
+| 27s | 391 | **509** |
+| 42s | 629 | 502 |
+| 58s | 864 | 501 |
+| 75s | →unbounded | **501** |
+
+Result: **889 accepted (200) + 1,091 shed (429+Retry-After)**; queue **stabilized at ~500** instead of running away. OTLP exporters honor `Retry-After`, so shed load becomes client-side backoff, not data loss.
+
+**Takeaway:** P1 is the highest-value correctness fix after the P0 throughput work — it converts an unbounded-failure path into graceful, bounded load-shedding. Production version should: make the high-water configurable, key it per-tenant if desired, pair it with the **separate ingest/detector queues** (the detector fan-out shares the same `celery` queue today), and keep a DLQ + orphan-S3 reconciliation for the enqueue-failure path.

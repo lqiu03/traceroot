@@ -12,6 +12,7 @@ Four files, all reversible. Each is a measured experiment, not a finished change
 1. `backend/rest/routers/public/traces.py`
    - `import asyncio`; offload blocking S3 `upload_json` via `asyncio.to_thread`; run `head_bucket` once per process (`_ensure_bucket_once`).
    - Redis-cache API-key validation (`_get_auth_redis`, `authcache:` keys, TTL 30s) to skip the per-request web+Postgres round-trip.
+   - **Admission control (P1):** `LLEN celery`; if backlog > `_QUEUE_HIGH_WATER` (500) return `429 + Retry-After` before doing work — bounded load-shedding instead of an unbounded queue.
 2. `docker/Dockerfile.rest` — `uvicorn ... --workers 4` (was a single worker).
 3. `backend/db/clickhouse/client.py` — `async_insert=1, wait_for_async_insert=1` on both inserts.
 4. `backend/worker/ingest_tasks.py` — drop `FINAL` from the read-before-write existence check.
@@ -29,6 +30,8 @@ Four files, all reversible. Each is a measured experiment, not a finished change
 - Redis-caching auth validation dropped **web CPU 100%→0%**; bottleneck moved to **worker→ClickHouse**.
 - ClickHouse "too many parts" is **NOT** an imminent risk at current scale (`parts_to_throw_insert=3000`; 400 small inserts → 4 parts). `async_insert`/`FINAL` removal are scale-gated (correct, but no measurable gain on a dev laptop).
 - Absolute RPS is compressed because all tiers are co-located on one dev laptop (~8–10 shared cores). The reproducible result is the **migration of the hot tier** down the stack with each fix.
+- **P1 (unbounded queue) demonstrated + fixed:** with the worker throttled to concurrency 1, the queue grew unbounded while REST returned 200 for everything (no backpressure). Adding admission control (`429+Retry-After` above a 500-task high-water) made the backlog **stabilize at ~500** (889 accepted / 1,091 shed) instead of running away. See the "P1 demonstrated end-to-end" section of `traceroot-loadtest-results.md` and `loadtest/metrics_backlog.csv` (failure) vs `metrics_backpressure.csv` (fixed).
+- Also observed live: the **free-plan 50k-event quota** flipped `ingestion_blocked` via the hourly billing job mid-test → ingestion returned 402 (roadmap L3, eventually-consistent quota).
 
 ## How to resume / re-run the load test
 1. Bring up the stack (`make prod-lite`, or `docker compose -f docker-compose.prod.yml up --build`).
@@ -39,7 +42,12 @@ Four files, all reversible. Each is a measured experiment, not a finished change
    Poller (separate shell): `bash loadtest/poller.sh`
 
 ## Suggested next step (where the spike series stopped)
-The hot tier is now **worker → ClickHouse**. To measure the worker-path fixes properly, the dev laptop
-needs per-container CPU limits + worker replicas (and/or millions of seeded rows). Otherwise the next
-high-value, production-relevant items are: bounded queue + backpressure (429/Retry-After) + DLQ,
-separate Celery queues for ingest vs detector, and plan/org-tiered rate limits (evolving PR #565).
+P0 (REST concurrency + non-blocking I/O), 0.3b (auth cache), P2 (async_insert/FINAL, scale-gated), and
+**P1 (admission control / backpressure)** are all now prototyped and measured. Remaining high-value items:
+- **Separate Celery queues** for ingest vs detector (the detector fan-out shares the `celery` queue today,
+  so detector load can starve ingestion and inflate the backlog the high-water sees).
+- **DLQ + orphan-S3 reconciliation** for the enqueue-failure path (currently swallowed → silent loss on Redis OOM).
+- **Plan/org-tiered rate limits** (evolve PR #565; per-resource buckets, per-org override, moving-window).
+- **Cleaner-isolation re-measure**: per-container CPU limits + worker replicas (and/or millions of seeded
+  rows) to show the worker-path / independent-tier scaling that a co-located laptop can't.
+- Productionize the backpressure prototype: configurable high-water, per-tenant option, metrics on shed rate.

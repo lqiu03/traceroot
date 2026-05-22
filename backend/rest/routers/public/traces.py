@@ -40,6 +40,11 @@ logger = logging.getLogger(__name__)
 # SCRATCH/LOAD-TEST ONLY (not for production merge): de-block the ingest path.
 _bucket_checked = False
 
+# SCRATCH/LOAD-TEST ONLY: admission control. Shed load with 429+Retry-After when
+# the Celery backlog exceeds this high-water mark, instead of accepting unbounded.
+_QUEUE_HIGH_WATER = 500
+_CELERY_QUEUE_NAME = "celery"
+
 
 async def _ensure_bucket_once(s3_service) -> None:
     """Run the blocking head_bucket check once per process, off the event loop."""
@@ -233,6 +238,19 @@ async def ingest_traces(
         )
 
     project_id = auth.project_id
+
+    # Admission control: shed load when the Celery backlog is too deep, so we
+    # never accept unbounded work. 429 + Retry-After lets OTLP exporters back off.
+    try:
+        backlog = await _get_auth_redis().llen(_CELERY_QUEUE_NAME)
+    except Exception:
+        backlog = 0
+    if backlog > _QUEUE_HIGH_WATER:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Ingestion backlog too deep ({backlog}). Retry shortly.",
+            headers={"Retry-After": "5"},
+        )
 
     # 1. Read body
     body = await request.body()
