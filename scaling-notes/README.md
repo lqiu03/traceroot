@@ -4,6 +4,10 @@ Throwaway exploration branch off `main`. Captures a measured investigation into 
 ingestion scaling, plus a load-test harness and prototype fixes. **Not production-ready; not for merge.**
 Resume point for continuing on another machine.
 
+> **New here? Start with [`HANDOFF.md`](HANDOFF.md)** — the agent-oriented handoff: full research
+> arc, key findings, how to resume, the open direction decision, and open research questions.
+> The project direction has **not** been decided yet; nothing is merged.
+
 ## What's in this branch
 
 ### Prototype code changes (scratch spikes, on top of `main`)
