@@ -166,3 +166,21 @@ Queue grew **linearly, unbounded**; REST returned **200 for every request** (0 e
 Result: **889 accepted (200) + 1,091 shed (429+Retry-After)**; queue **stabilized at ~500** instead of running away. OTLP exporters honor `Retry-After`, so shed load becomes client-side backoff, not data loss.
 
 **Takeaway:** P1 is the highest-value correctness fix after the P0 throughput work — it converts an unbounded-failure path into graceful, bounded load-shedding. Production version should: make the high-water configurable, key it per-tenant if desired, pair it with the **separate ingest/detector queues** (the detector fan-out shares the same `celery` queue today), and keep a DLQ + orphan-S3 reconciliation for the enqueue-failure path.
+
+### Worker scaling — the production complement to backpressure (concurrency-1 × N replicas)
+
+Same overload (conc=40, spans=20, 75s, high-water 500), varying worker drain slots:
+
+| | 1 drain slot (1×conc1) | 3 drain slots (3×conc1) |
+|---|---|---|
+| Accepted (200) | 889 | **1,379** |
+| Shed (429) | 1,091 | **100** |
+| Drain rate | ~85 spans/s | **~242 spans/s (~2.85×)** |
+| Queue trajectory | →500 by ~34s, then capped | →500 only at ~73s (barely) |
+
+Drain rate scales **~linearly** with worker replicas. With 3 slots the queue grew slowly
+enough that admission control fired only at the very end (100 shed vs 1,091). Conclusion:
+**admission control bounds the backlog (safety); worker replicas raise goodput (capacity).**
+The production posture is both — cap with `429`, and scale the worker tier on queue
+depth / CPU. This is the cleanest end-to-end validation of roadmap items P1 + "scale the
+worker tier" (`metrics_backlog.csv` → `metrics_backpressure.csv` → `metrics_3workers.csv`).
