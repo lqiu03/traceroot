@@ -17,6 +17,9 @@ Four files, all reversible. Each is a measured experiment, not a finished change
 3. `backend/db/clickhouse/client.py` — `async_insert=1, wait_for_async_insert=1` on both inserts.
 4. `backend/worker/ingest_tasks.py` — drop `FINAL` from the read-before-write existence check.
 
+### Forward plan
+- `PLAN.md` — phased delivery plan (Phase 1 ship validated hot-path fixes → Phase 2 durability/fairness → Phase 3 scale-out infra → Phase 4 efficiency-at-volume), with effort, DoD, and decisions needed.
+
 ### Analysis (the bulk of the thinking)
 - `traceroot-scaling-assessment.md` — architecture map vs Langfuse/SigNoz/Opik/Phoenix, gap matrix, OTLP contract, tiered roadmap.
 - `traceroot-loadtest-results.md` — **the load-test results**: baseline → P0 → auth-cache → worker/CH, with before/after RPS, p99, CPU tables, and the bottleneck-migration narrative.
