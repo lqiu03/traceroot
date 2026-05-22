@@ -21,6 +21,7 @@ Four files, all reversible. Each is a measured experiment, not a finished change
 - `traceroot-scaling-assessment.md` — architecture map vs Langfuse/SigNoz/Opik/Phoenix, gap matrix, OTLP contract, tiered roadmap.
 - `traceroot-loadtest-results.md` — **the load-test results**: baseline → P0 → auth-cache → worker/CH, with before/after RPS, p99, CPU tables, and the bottleneck-migration narrative.
 - `pr-565-review-draft.md` + `pr-565-proposed-adjustments.md` — review + patches for the open rate-limiting PR #565 (verdict: request changes; Greptile's headline finding is a false positive).
+- `adr/` — Architecture Decision Records distilled from the measured evidence: ADR-001 (REST concurrency + non-blocking I/O), ADR-002 (auth-validation caching), ADR-003 (admission control + bounded queue + DLQ).
 - `loadtest/loadgen.py` + `loadtest/poller.sh` — the reusable harness (OTLP/protobuf, host external client + metrics poller).
 - `loadtest/metrics_before.csv` / `metrics_after.csv` — sampled queue depth + ClickHouse parts/rows.
 
