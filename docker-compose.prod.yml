@@ -159,7 +159,7 @@ services:
       # --- Encryption ---
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
       # --- Billing ---
-      ENABLE_BILLING: ${ENABLE_BILLING:-true}
+      ENABLE_BILLING: ${ENABLE_BILLING:-false}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
       STRIPE_WEBHOOK_SIGNING_SECRET: ${STRIPE_WEBHOOK_SIGNING_SECRET:-}
       STRIPE_PRICE_ID_STARTER: ${STRIPE_PRICE_ID_STARTER:-}
@@ -220,6 +220,11 @@ services:
       # --- Secrets ---
       INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:-internal-secret}
       CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:3000"]}
+      # --- Billing ---
+      # Self-host (ENABLE_BILLING=false) disables REST rate limiting and unlocks
+      # all tiers; read by ee.license.is_billing_enabled(). The limiter lives in
+      # this service, so this var is what actually gates enforcement on self-host.
+      ENABLE_BILLING: ${ENABLE_BILLING:-false}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -278,7 +283,7 @@ services:
       # --- Secrets ---
       INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:-internal-secret}
       # --- Billing ---
-      ENABLE_BILLING: ${ENABLE_BILLING:-true}
+      ENABLE_BILLING: ${ENABLE_BILLING:-false}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
       STRIPE_WEBHOOK_SIGNING_SECRET: ${STRIPE_WEBHOOK_SIGNING_SECRET:-}
       STRIPE_PRICE_ID_STARTER: ${STRIPE_PRICE_ID_STARTER:-}
