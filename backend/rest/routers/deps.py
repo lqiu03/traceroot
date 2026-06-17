@@ -8,6 +8,7 @@ from fastapi import Depends, Header, HTTPException, Request, status
 
 from rest.rate_limit import (
     clear_request_rate_limit_exempt,
+    is_request_rate_limit_exempt,
     mark_request_rate_limit_exempt,
     set_rate_limit_identity,
 )
@@ -133,7 +134,16 @@ async def get_rate_limited_project_access(
     bucket by workspace and resolve the plan tier. The internal-secret bypass is
     applied inside ``get_project_access`` (it marks the request exempt), so this
     wrapper only needs to forward the resolved workspace/plan.
+
+    A non-exempt request must carry a workspace; if the auth service returned
+    none, treat it as a malformed response (503) rather than bucketing the
+    request under a shared fallback. Exempt internal calls skip this check.
     """
+    if not access.workspace_id and not is_request_rate_limit_exempt():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication service returned no workspace for a rate-limited request",
+        )
     set_rate_limit_identity(request, access.workspace_id, access.billing_plan)
     return access
 

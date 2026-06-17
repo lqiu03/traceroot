@@ -380,7 +380,7 @@ def test_resolve_limit_applies_per_plan_limits(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# G. Hardening: shadow mode, degraded-storage signal
+# G. Hardening: degraded-storage signal
 # ---------------------------------------------------------------------------
 
 
@@ -408,32 +408,9 @@ def _build_app_with_limiter(limiter, *, plan: str, workspace: str) -> FastAPI:
     return app
 
 
-def test_shadow_mode_records_but_does_not_block(monkeypatch, caplog):
-    """Shadow mode evaluates the limit (counts + logs) but never returns 429."""
-    # Arrange: shadow on, billing on, tiny limit, deterministic in-memory storage.
-    monkeypatch.setattr(rate_limit.settings.rate_limit, "shadow", True)
-    monkeypatch.setattr(rate_limit.settings.rate_limit, "enabled", True)
-    monkeypatch.setattr(rate_limit.settings.rate_limit, "storage_uri", "memory://")
-    monkeypatch.setitem(_PLAN_LIMITS_READ, "free", "2/minute")
-    monkeypatch.setenv("ENABLE_BILLING", "true")
-    client = TestClient(
-        _build_app_with_limiter(rate_limit._build_limiter(), plan="free", workspace="ws-shadow")
-    )
-
-    # Act
-    with caplog.at_level("WARNING"):
-        codes = [client.get("/r").status_code for _ in range(4)]
-
-    # Assert: never blocked past the 2/min limit...
-    assert codes == [200, 200, 200, 200]
-    # ...but the over-limit events were observed (proves it counted, not just off).
-    assert any("shadow" in r.message.lower() for r in caplog.records)
-
-
-def test_enforce_mode_blocks_when_shadow_is_off(monkeypatch):
-    """Sanity contrast: with shadow off, _build_limiter enforces (3rd request 429)."""
-    # Arrange
-    monkeypatch.setattr(rate_limit.settings.rate_limit, "shadow", False)
+def test_enforce_mode_blocks_over_limit(monkeypatch):
+    """_build_limiter enforces: billing on + a 2/min cap means the 3rd request 429s."""
+    # Arrange: billing on, tiny limit, deterministic in-memory storage.
     monkeypatch.setattr(rate_limit.settings.rate_limit, "enabled", True)
     monkeypatch.setattr(rate_limit.settings.rate_limit, "storage_uri", "memory://")
     monkeypatch.setitem(_PLAN_LIMITS_READ, "free", "2/minute")
@@ -465,8 +442,32 @@ def test_throttle_record_flags_degraded_storage(caplog):
     assert any("degraded" in r.message.lower() for r in caplog.records)
 
 
+def test_retry_after_omitted_when_reset_time_unavailable():
+    """When neither live window stats nor the limit's own window are available,
+    the 429 is still returned with NO ``Retry-After`` header (it is optional) and
+    is never turned into a 500."""
+    import json
+    from types import SimpleNamespace
+
+    # No ``view_rate_limit`` on state (window-stats path skipped) and an exception
+    # carrying no limit (window-size path fails) -> retry_after cannot be derived.
+    request = SimpleNamespace(
+        state=SimpleNamespace(rl_bucket="read", rl_workspace_id="ws1", rl_billing_plan="free"),
+        app=SimpleNamespace(state=SimpleNamespace(limiter=SimpleNamespace(_storage_dead=False))),
+    )
+    exc = SimpleNamespace(limit=None)
+
+    response = rate_limit.rate_limit_exceeded_handler(request, exc)
+
+    assert response.status_code == 429
+    assert "Retry-After" not in response.headers
+    body = json.loads(response.body)
+    assert body["error"] == "too_many_requests"
+    assert "retry_after" not in body
+
+
 # ---------------------------------------------------------------------------
-# H. Bucket isolation + unknown-workspace fallback
+# H. Bucket isolation + workspace requirement
 # ---------------------------------------------------------------------------
 def _build_ingest_and_read_app() -> FastAPI:
     """App with BOTH an ingest route (.limit) and a read route (.shared_limit).
@@ -523,39 +524,42 @@ def test_ingest_and_read_buckets_do_not_share_a_counter():
     assert [client.post("/ingest").status_code for _ in range(3)] == [200, 200, 429]
 
 
-def test_missing_workspace_falls_back_to_unknown_bucket_and_warns(caplog):
-    """A non-exempt request with no workspace lands in the shared ``unknown``
-    bucket and logs a warning, so a broken validate contract is visible rather
-    than silently collapsing tenants into one shared bucket."""
-    # Arrange
-    request = Request({"type": "http", "headers": [], "state": {}})
+def test_read_without_workspace_is_rejected_with_503():
+    """A non-exempt read whose auth resolved no workspace is rejected (503) rather
+    than collapsing tenants into a shared fallback bucket."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from rest.routers.deps import ProjectAccessInfo, get_rate_limited_project_access
+
     rate_limit.clear_request_rate_limit_exempt()
-
-    # Act
-    with caplog.at_level("WARNING"):
-        rate_limit.set_rate_limit_identity(request, "", "free")
-    key = rate_limit.key_read(request)
-
-    # Assert: collapses to the shared fallback bucket, and the collapse is logged.
-    assert key == f"rl:{rate_limit.BUCKET_READ}:free:{rate_limit._UNKNOWN_WORKSPACE}"
-    assert any("unknown workspace" in r.message.lower() for r in caplog.records)
-
-
-def test_exempt_request_with_missing_workspace_does_not_warn(caplog):
-    """Trusted internal (exempt) calls legitimately have no workspace, so the
-    unknown-workspace fallback must NOT warn for them."""
-    # Arrange
     request = Request({"type": "http", "headers": [], "state": {}})
+    access = ProjectAccessInfo(
+        project_id="p", user_id="u", role="ADMIN", workspace_id="", billing_plan="free"
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(get_rate_limited_project_access(request, access))
+    assert excinfo.value.status_code == 503
+
+
+def test_exempt_read_without_workspace_is_allowed():
+    """Trusted internal (exempt) calls legitimately carry no workspace; they skip
+    the workspace requirement and are not rejected."""
+    import asyncio
+
+    from rest.routers.deps import ProjectAccessInfo, get_rate_limited_project_access
+
     rate_limit.clear_request_rate_limit_exempt()
     rate_limit.mark_request_rate_limit_exempt()
-
-    # Act
     try:
-        with caplog.at_level("WARNING"):
-            rate_limit.set_rate_limit_identity(request, "", "free")
+        request = Request({"type": "http", "headers": [], "state": {}})
+        access = ProjectAccessInfo(
+            project_id="p", user_id="u", role="ADMIN", workspace_id="", billing_plan="free"
+        )
+        result = asyncio.run(get_rate_limited_project_access(request, access))
+        assert result is access
     finally:
         # Don't leak the exemption into other tests sharing this context.
         rate_limit.clear_request_rate_limit_exempt()
-
-    # Assert
-    assert not any("unknown workspace" in r.message.lower() for r in caplog.records)
