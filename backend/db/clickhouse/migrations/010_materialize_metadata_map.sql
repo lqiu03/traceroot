@@ -1,0 +1,78 @@
+-- +goose Up
+
+-- Rewrite pre-009 parts so they STORE metadata_map, making existing history answer
+-- metadata filters, render the metadata column, and contribute discovered keys.
+--
+-- Split from 009 because the two halves have different costs and different failure modes,
+-- NOT because this half is optional or discretionary. Both deploy paths run goose over the
+-- whole migrations directory with `up` -- docker-compose's `migrate-clickhouse` service,
+-- which every app service gates on with `service_completed_successfully`, and the helm
+-- post-install/pre-upgrade migration Job -- so this file runs automatically, unattended,
+-- wherever 009 runs. There is no low-traffic window to choose and no supported way to hold
+-- it back. Contrast 008, whose `MATERIALIZE PROJECTION` really is off the migration path:
+-- it is a sentence in a comment rather than a statement in a file, precisely because it is
+-- optional there. Here it is not, for the reason below. What this file adds over 009 is
+-- reach backwards over history; 009 alone is already correct for data ingested from here on.
+--
+-- WHERE THIS DIFFERS FROM 008, which explicitly refuses to materialize: there, a part
+-- that does not yet carry the rebuilt projection is still READ correctly -- the query
+-- falls back to the base table and returns the same rows, only slower -- and parts pick
+-- the projection up on their own as they merge. So 008's materialize is pure speed, and
+-- skipping it costs nothing but time. Here, skipping is a wrong ANSWER, and nothing
+-- arrives on its own: a merge rewrites the part but the map is computed from `metadata`
+-- only when a query reads `metadata`, which ours never do. This is why the step is
+-- required rather than optional, and why it is a migration file with a number rather
+-- than a sentence in a runbook.
+--
+-- The mechanism, verified rather than assumed. A part written before 009's ALTER does
+-- not store the column, and ClickHouse computes it on read ONLY when the query also
+-- reads `metadata`, the column the expression derives from. Our queries deliberately do
+-- not: reading the blob is the cost this column exists to avoid. So on an unmaterialized
+-- part the map reads back EMPTY rather than computed -- no error, just a trace that
+-- answers every metadata filter as though it carried no metadata, shows an empty
+-- metadata column, and contributes no discovered keys.
+--
+-- Verified on ClickHouse 25.2 against a pre-ALTER row:
+--   SELECT length(mm)                     FROM t WHERE id='old'  -- 0
+--   SELECT length(mm), length(metadata)   FROM t WHERE id='old'  -- 1
+-- Same row, same column; the second reads the source and so computes. Rows inserted
+-- after the ALTER store the map and are correct either way, which is what makes the gap
+-- easy to miss: it shows up only on history, and only in the read shape we ship.
+--
+-- WHAT THIS ACTUALLY DOES AT DEPLOY TIME, and the hazard that hides in it. The mutation is
+-- asynchronous (ClickHouse defaults to mutations_sync=0), so the statements below return as
+-- soon as the mutation is QUEUED: the deploy does not block on the rewrite, and history
+-- becomes filterable gradually as parts are rewritten in the background, unthrottled,
+-- competing with live ingestion for the same disk and CPU.
+--
+-- The inverse of that convenience is the part to watch. goose records this version as
+-- applied at the moment of queueing, not the moment of completion -- so the migration
+-- tracker reports done before a single part has been rewritten. A mutation that then never
+-- finishes, killed by a restart, by disk pressure, or by a deliberate KILL MUTATION, leaves
+-- history permanently unbackfilled: it answers metadata questions as though it carried no
+-- metadata (the failure described above), nothing signals it, and goose will not re-run this
+-- file because it considers the version applied.
+--
+-- So verify rather than assume, on the first deploy that applies this file:
+--   SELECT * FROM system.mutations WHERE table IN ('spans','traces') AND NOT is_done;
+-- An empty result means the rewrite has finished. A row that lingers is in progress; a row
+-- with a non-empty latest_fail_reason is the case above. Recovery is to re-issue the
+-- statement by hand -- MATERIALIZE COLUMN is idempotent, since a part that already stores
+-- the column just recomputes the same value from the same expression -- so the lack of a
+-- re-run path through goose costs nothing but the noticing. An install large enough that
+-- the one-shot rewrite is itself what caused the trouble can re-drive it per partition,
+-- newest first, accepting that older partitions answer empty until their turn:
+--   ALTER TABLE spans MATERIALIZE COLUMN metadata_map IN PARTITION '202607';
+
+ALTER TABLE spans  MATERIALIZE COLUMN metadata_map;
+ALTER TABLE traces MATERIALIZE COLUMN metadata_map;
+
+-- +goose Down
+
+-- Deliberately a no-op. MATERIALIZE COLUMN rewrites parts so they store a value the
+-- expression already defines; there is no inverse that un-stores it, and un-storing it
+-- would change no answer, since a stored map and a computed map are the same map. The
+-- only reversible half of this feature is 009's DROP COLUMN, which removes the column and
+-- the rewritten data with it -- so rolling back means rolling back past 009. The
+-- statement below exists only to give goose something to execute.
+SELECT 1;
